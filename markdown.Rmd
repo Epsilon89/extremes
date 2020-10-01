@@ -1,0 +1,239 @@
+---
+title: "Continuous distributions"
+author: "Fraser Tough"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::material:
+    highlight: tango
+    number_sections: true
+    lightbox: true
+    gallery: true
+runtime: shiny
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+pziweibull=function(q,w,shape,scale)
+{
+  ifelse(q==0,w,(1-w)*pweibull(q,shape,scale)+w)
+}
+
+dziweibull=function(x,w,shape,scale)
+{
+  ifelse(x==0,w,dweibull(x,shape,scale)*(1-w))
+}
+
+qziweibull = function(p,w,shape,scale,br=c(0,10000))
+{
+  if(p<w){0}else{
+    G = function(x) pziweibull(x,w,shape,scale)-p
+    return( uniroot(G,br)$root ) 
+  }
+}
+BoxCox=function(x,lambda)(x ^ lambda - 1)/lambda
+InvBoxCox=function(x,lambda)(x*lambda +1)^(1/lambda)
+
+suppressMessages(library(knitr))
+suppressMessages(library(rmdformats))
+suppressMessages(library(lubridate))
+suppressMessages(library(plyr))
+suppressMessages(library(MASS))
+suppressMessages(library(gamlss))
+suppressMessages(library(data.table))
+suppressMessages(library(viridis))
+## Global options
+#options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+#opts_knit$set(width=75)
+```
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# The problem with rainfall 
+
+Before developers carry out development, they need to characterise and understand precipitation in the local region. The vast majority of the planet observes seasonal variation in rainfall which, at many times of year, can result in the inability to carry out works. If precipitation levels are poorly understood, leading to misinformed decision making, this can result to project delay or even property damage. In regions with large seasonal variation, understanding the likely levels of rainfall prior to construction can help planners manage when to start works, minimising the probability of delay.
+
+Rainfall distributions, therefore, play a pivotal role in project planning and construction design.
+
+
+## The distribution of rainfall
+## Weibull mixture model
+
+Rainfall distributions are bounded by zero, have long tails and can generally be well characterised by the 2 parameter Weibull. In locations with heavy average rainfall, the 3 parameter Weibull can also be used. However, the Weibull is undefined at 0 and the lower the temporal resolution, the higher the probability that zeros will occur. 
+
+The shape and scale of the distributions varies by time of year. In northern Europe, for example, rainfall is heaviest during the winter. In summer, it is likely that daily average rainfall will be zero cm per day.
+
+Characterising all three of these parameters, scale, shape and probability of zero requires a mixture model. The probability that rainfall will be positive if Bernoulli distributed and if rain does occur, the probability density is Weibull distributed. 
+
+The following mixture model can be used,
+
+\begin{align}
+f(y) =
+\begin{cases}
+ p\left(\frac{k}{\lambda}\Bigl(\frac{x}{k}\Bigr)^{k-1} \exp\bigl(-(x/\lambda)^k\bigr)\right) & x > 0 \\[1ex]
+
+ (1-p)  & x=0
+ \end{cases}       
+\end{align}
+
+which consists of both discrete (Bernoulli) and continuous (Weibull) parts.
+
+
+```{r, echo=FALSE}
+shinyAppFile(
+  "./apps/ZIW.R",
+  options = list(
+    width = "100%", height = 550
+  )
+)
+```
+
+## Modelling seasonailty via harmonics
+
+Most environmental trends exhibit diurnal or seasonal trend which smoothly varies across time. These trends tend to 
+Any periodic function can be represented as a sum of cosine waves and 
+Seasonal trend is circular. Values of the variable of interest at start and endpoints of a year should match
+
+Generally, seasonal trend can be well captured by
+
+
+Fourier components are 
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+##################READ DATA IN###############
+#############################################
+
+Data=data.frame(fread("./data/killermont rainfall.csv",skip=20))[,1:2]
+colnames(Data)<-c("DATE","PRCP")
+
+Data$DATE=dmy(Data$DATE)
+Data$Month=factor(month(Data$DATE))
+Data$Year=year(Data$DATE)
+Data$PRCP=ifelse(is.na(Data$PRCP),0,Data$PRCP)
+Data$DecimalDate=decimal_date(Data$DATE)
+Data$DecimalYear=decimal_date(Data$DATE)-year(Data$DATE)
+Data$PRCP_cat=factor(ifelse(Data$PRCP>0,1,0))
+Data$yday=yday(Data$DATE)
+
+#############################################
+##################Models###############
+#############################################
+newdata=data.frame("DecimalYear"=seq(0,1,length.out=365))
+
+gamlss=gamlss(PRCP~sin(2*pi*DecimalYear)+cos(2*pi*DecimalYear),
+              sigma.fo=~1,data=Data[Data$PRCP>0,c("PRCP","DecimalYear")],family="WEI",trace=FALSE)
+glm=glm(PRCP_cat~sin(2*pi*DecimalYear)+cos(2*pi*DecimalYear),data=Data,family="binomial")
+
+p_gamlss=predictAll(gamlss,newdata=newdata,data=Data[Data$PRCP>0,c("PRCP","DecimalYear")])
+p_glm=predict(glm,newdata=newdata,type="response")
+
+newdata$yday=1:365
+newdata$w=p_glm
+newdata$shape=p_gamlss$sigma
+newdata$scale=p_gamlss$mu
+
+
+
+#############################################
+##################Quantiles###############
+#############################################
+Q=c(0,0.95,0.96,0.97,0.99,0.995,0.996,0.997,0.998,0.999)
+col=viridis(length(Q),alpha=0.5)
+
+quantiles=data.frame(t(sapply(1:nrow(newdata),function(i){sapply(Q,function(s)qziweibull(s,w=newdata$w[i],shape=newdata$shape[i],scale=newdata$scale[i]))})))
+quantile_names=paste0("Q",Q*100)
+colnames(quantiles)<-quantile_names
+quantiles=cbind(newdata,quantiles)
+
+# #setwd(paste0(getwd(),"/data"))
+# data_flow=data.frame(fread("./data/killermont flow.csv",skip=20))[,1:2]
+# colnames(data_flow)<-c("datetime","flow")
+# data_flow$datetime=dmy(data_flow$datetime)
+# 
+# data_list_rainfall=lapply(list.files(recursive = TRUE)[grepl("rainfall",list.files(recursive = TRUE))],function(x){
+#   data=data.frame(fread(x,skip=20))[,1:2]
+#   colnames(data)<-c("datetime",paste0("rainfall_",substr(x,1,regexpr(" ",x)-1)))
+# 
+#   if(is.na(ymd(data$datetime[1]))){
+#   data$datetime=dmy(data$datetime)
+#   }else{
+#     data$datetime=ymd(data$datetime)
+#   }
+#   return(data)
+#   })
+# names(data_list_rainfall)<-sapply(list.files()[grepl("rainfall",list.files())],function(x)substr(x,1,regexpr(" ",x)-1))
+# data_rainfall=join_all(data_list_rainfall,by="datetime")
+# data=join(data_flow,data_rainfall,by="datetime")
+# data=data[complete.cases(data),]
+# head(data)
+# #BX=boxcox(lm(flow~1,data),plotit = FALSE)
+# 
+# #Set Box-Cox
+# # BX=boxcox(lm(flow~1,data))
+# # lambda=BX$x[which.max(BX$y)]+0.001
+# # lambda= -0.199
+# # data$tflow=BoxCox(data$flow,lambda)
+# data$DecimalDate=decimal_date(data$datetime)
+# data$DecimalYear=decimal_date(data$datetime)-year(data$datetime)
+# data=data[complete.cases(data),]
+
+```
+
+\begin{align}
+E(y|x)=\alpha+\beta cos(2\pi-\gamma)
+\end{align}
+
+\begin{align}
+E(y|x)=\alpha+A sin(2\pi-\gamma)+B sin(2\pi-\gamma)
+\newline
+\alpha=\alpha
+\newline
+\beta=\sqrt{A^2+B^2}
+\newline
+\gamma=atan2(A,B)
+
+\end{align}
+
+
+
+```{r, echo=FALSE}
+shinyAppFile(
+  "./apps/harmonics.R",
+  options = list(
+    width = "80%", height = 550
+  )
+)
+```
+
+
+Carry out construction at a different time of day or year
+hourly uncertainty - this is just the average of the day
+Rainfall vs. flow level ( download flow data further up river)
+different distributions - compare AIC using adaption - prove that AIC is same as leave one out cross
+
+
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#Plots
+ par(bg="black",fg="white",col.lab="white",col.main="white",col.lab="white",col.axis="white",col.sub="white")
+plot(Data$PRCP~Data$yday,pch=20,cex=0.1,ylab="Precipitation (in.)",xlab="Day of year")
+    abline(v=seq(0,max(Data$yday),length.out = 11),col="grey20",lty=2)
+    abline(h=seq(0,max(Data$PRCP),length.out = 11),col="grey20",lty=2)
+
+sapply(length(quantile_names):2,function(i){
+  suppressMessages(polygon(c(quantiles$yday,rev(quantiles$yday)),c(quantiles[[quantile_names[i]]],rev(quantiles[[quantile_names[i-1]]])),col=col[i],border=NA))
+})
+legend("topright",legend=paste0("Centiles ",rev(c("10-20","20-30","30-40","40-50","50-60","60-70","80-90"))),col=rev(col),lwd=10,bty="n")
+```
+
